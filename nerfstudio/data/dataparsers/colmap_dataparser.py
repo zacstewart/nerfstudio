@@ -20,10 +20,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from functools import partial
-from typing import List, Literal, Optional, Type
+from typing import Callable, List, Literal, Optional, Type
 
 import numpy as np
 import torch
+from torchvision.transforms import Resize
 from PIL import Image
 from rich.prompt import Confirm
 
@@ -423,23 +424,40 @@ class ColmapDataParser(DataParser):
             out["points3D_points2D_xy"] = torch.stack(points3D_image_xy, dim=0)
         return out
 
-    def _downscale_images(self, paths, get_fname, downscale_factor: int, nearest_neighbor: bool = False):
+    # def _downscale_images(self, paths, get_fname, downscale_factor: int, nearest_neighbor: bool = False):
+    #     with status(msg="[bold yellow]Downscaling images...", spinner="growVertical"):
+    #         assert downscale_factor > 1
+    #         assert isinstance(downscale_factor, int)
+    #         # Using %05d ffmpeg commands appears to be unreliable (skips images).
+    #         for path in paths:
+    #             nn_flag = "" if not nearest_neighbor else ":flags=neighbor"
+    #             path_out = get_fname(path)
+    #             path_out.parent.mkdir(parents=True, exist_ok=True)
+    #             ffmpeg_cmd = [
+    #                 f'ffmpeg -y -noautorotate -i "{path}" ',
+    #                 f"-q:v 2 -vf scale=iw/{downscale_factor}:ih/{downscale_factor}{nn_flag} ",
+    #                 f'"{path_out}"',
+    #             ]
+    #             ffmpeg_cmd = " ".join(ffmpeg_cmd)
+    #             run_command(ffmpeg_cmd)
+
+    #     CONSOLE.log("[bold green]:tada: Done downscaling images.")
+    
+    def _downscale_images(
+        self, 
+        image_filenames: List[Path], 
+        get_fname: Callable, 
+        downscale_factor: float,
+        nearest_neighbor: Optional[bool] = False
+    ):
         with status(msg="[bold yellow]Downscaling images...", spinner="growVertical"):
             assert downscale_factor > 1
-            assert isinstance(downscale_factor, int)
-            # Using %05d ffmpeg commands appears to be unreliable (skips images).
-            for path in paths:
-                nn_flag = "" if not nearest_neighbor else ":flags=neighbor"
-                path_out = get_fname(path)
-                path_out.parent.mkdir(parents=True, exist_ok=True)
-                ffmpeg_cmd = [
-                    f'ffmpeg -y -noautorotate -i "{path}" ',
-                    f"-q:v 2 -vf scale=iw/{downscale_factor}:ih/{downscale_factor}{nn_flag} ",
-                    f'"{path_out}"',
-                ]
-                ffmpeg_cmd = " ".join(ffmpeg_cmd)
-                run_command(ffmpeg_cmd)
-
+            test_img = Image.open(image_filenames[0])
+            h, w = test_img.size
+            min_res = int(min(h, w) / (max(h, w) / MAX_AUTO_RESOLUTION))
+            for path in image_filenames:
+                img = Image.open(path)
+                path = Resize(size=min_res)(test_img)
         CONSOLE.log("[bold green]:tada: Done downscaling images.")
 
     def _setup_downscale_factor(
@@ -460,14 +478,9 @@ class ColmapDataParser(DataParser):
             if self.config.downscale_factor is None:
                 test_img = Image.open(filepath)
                 h, w = test_img.size
-                max_res = max(h, w)
-                df = 0
-                while True:
-                    if (max_res / 2 ** (df)) < MAX_AUTO_RESOLUTION:
-                        break
-                    df += 1
-
-                self._downscale_factor = 2**df
+                min_res = int(min(h, w) / (max(h, w) / MAX_AUTO_RESOLUTION))
+                # test_img = Resize(size=min_res)(test_img)
+                self._downscale_factor = min(h, w) / min_res
                 CONSOLE.log(f"Using image downscale factor of {self._downscale_factor}")
             else:
                 self._downscale_factor = self.config.downscale_factor
@@ -481,6 +494,7 @@ class ColmapDataParser(DataParser):
                 )
                 if Confirm.ask("\nWould you like to downscale the images now?", default=False, console=CONSOLE):
                     # Install the method
+                    print(image_filenames)
                     self._downscale_images(
                         image_filenames,
                         partial(get_fname, self.config.data / self.config.images_path),
