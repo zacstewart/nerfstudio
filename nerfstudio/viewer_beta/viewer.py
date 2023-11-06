@@ -95,7 +95,6 @@ class Viewer:
             websocket_port = self.config.websocket_port
         self.log_filename.parent.mkdir(exist_ok=True)
 
-
         # viewer specific variables
         self.output_type_changed = True
         self.output_split_type_changed = True
@@ -247,7 +246,7 @@ class Viewer:
                 self.camera_handles[idx].visible = visible
 
     def update_camera_poses(self):
-        #TODO this fn accounts for like ~5% of total train time
+        # TODO this fn accounts for like ~5% of total train time
         # Update the train camera locations based on optimization
         assert self.camera_handles is not None
         if hasattr(self.pipeline.datamanager, "train_camera_optimizer"):
