@@ -101,6 +101,33 @@ def projection_matrix(znear, zfar, fovx, fovy, device: Union[str, torch.device] 
 
 
 @dataclass
+class GaussianParameters():
+    """Parameters for individual Gaussians"""
+
+    def __init__(
+        self, 
+        means: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        scales: Optional[torch.Tensor] = None,
+        quats: Optional[torch.Tensor] = None,
+        opacities: Optional[torch.Tensor] = None,
+        features_dc: Optional[torch.Tensor] = None,
+        features_rest: Optional[torch.Tensor] = None,
+        features_custom: Optional[Dict] = None
+    ):
+        self.means = means
+        self.scales = scales
+        self.quats = quats
+        self.opacities = opacities
+        self.features_dc = features_dc 
+        self.features_rest = features_rest  
+        self.features_custom = features_custom
+
+    @property
+    def num_points(self):
+        return self.means.shape[0]
+
+
+@dataclass
 class SplatfactoModelConfig(ModelConfig):
     """Splatfacto Model Config, nerfstudio's implementation of Gaussian Splatting"""
 
@@ -176,18 +203,20 @@ class SplatfactoModel(Model):
         super().__init__(*args, **kwargs)
 
     def populate_modules(self):
+        self.gaussian_params = GaussianParameters()
+        
         if self.seed_points is not None and not self.config.random_init:
-            self.means = torch.nn.Parameter(self.seed_points[0])  # (Location, Color)
+            self.gaussian_params.means = torch.nn.Parameter(self.seed_points[0])  # (Location, Color)
         else:
-            self.means = torch.nn.Parameter((torch.rand((self.config.num_random, 3)) - 0.5) * self.config.random_scale)
+            self.gaussian_params.means = torch.nn.Parameter((torch.rand((self.config.num_random, 3)) - 0.5) * self.config.random_scale)
         self.xys_grad_norm = None
         self.max_2Dsize = None
-        distances, _ = self.k_nearest_sklearn(self.means.data, 3)
+        distances, _ = self.k_nearest_sklearn(self.gaussian_params.means.data, 3)
         distances = torch.from_numpy(distances)
         # find the average of the three nearest neighbors for each point and use that as the scale
         avg_dist = distances.mean(dim=-1, keepdim=True)
-        self.scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
-        self.quats = torch.nn.Parameter(random_quat_tensor(self.num_points))
+        self.gaussian_params.scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
+        self.gaussian_params.quats = torch.nn.Parameter(random_quat_tensor(self.num_points))
         dim_sh = num_sh_bases(self.config.sh_degree)
 
         if (
@@ -203,13 +232,13 @@ class SplatfactoModel(Model):
             else:
                 CONSOLE.log("use color only optimization with sigmoid activation")
                 shs[:, 0, :3] = torch.logit(self.seed_points[1] / 255, eps=1e-10)
-            self.features_dc = torch.nn.Parameter(shs[:, 0, :])
-            self.features_rest = torch.nn.Parameter(shs[:, 1:, :])
+            self.gaussian_params.features_dc = torch.nn.Parameter(shs[:, 0, :])
+            self.gaussian_params.features_rest = torch.nn.Parameter(shs[:, 1:, :])
         else:
-            self.features_dc = torch.nn.Parameter(torch.rand(self.num_points, 3))
-            self.features_rest = torch.nn.Parameter(torch.zeros((self.num_points, dim_sh - 1, 3)))
+            self.gaussian_params.features_dc = torch.nn.Parameter(torch.rand(self.num_points, 3))
+            self.gaussian_params.features_rest = torch.nn.Parameter(torch.zeros((self.num_points, dim_sh - 1, 3)))
 
-        self.opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(self.num_points, 1)))
+        self.gaussian_params.opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(self.num_points, 1)))
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -247,12 +276,12 @@ class SplatfactoModel(Model):
         # resize the parameters to match the new number of points
         self.step = 30000
         newp = dict["means"].shape[0]
-        self.means = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
-        self.scales = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
-        self.quats = torch.nn.Parameter(torch.zeros(newp, 4, device=self.device))
-        self.opacities = torch.nn.Parameter(torch.zeros(newp, 1, device=self.device))
-        self.features_dc = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
-        self.features_rest = torch.nn.Parameter(
+        self.gaussian_params.means = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
+        self.gaussian_params.scales = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
+        self.gaussian_params.quats = torch.nn.Parameter(torch.zeros(newp, 4, device=self.device))
+        self.gaussian_params.opacities = torch.nn.Parameter(torch.zeros(newp, 1, device=self.device))
+        self.gaussian_params.features_dc = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
+        self.gaussian_params.features_rest = torch.nn.Parameter(
             torch.zeros(newp, num_sh_bases(self.config.sh_degree) - 1, 3, device=self.device)
         )
         super().load_state_dict(dict, **kwargs)
@@ -385,7 +414,7 @@ class SplatfactoModel(Model):
                 assert self.xys_grad_norm is not None and self.vis_counts is not None and self.max_2Dsize is not None
                 avg_grad_norm = (self.xys_grad_norm / self.vis_counts) * 0.5 * max(self.last_size[0], self.last_size[1])
                 high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
-                splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
+                splits = (self.gaussian_params.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
                 if self.step < self.config.stop_screen_size_at:
                     splits |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
                 splits &= high_grads
@@ -409,6 +438,7 @@ class SplatfactoModel(Model):
                     dup_scales,
                     dup_quats,
                 ) = self.dup_gaussians(dups)
+                # TODO: move cat into gaussian_params
                 self.means = Parameter(torch.cat([self.means.detach(), split_means, dup_means], dim=0))
                 self.features_dc = Parameter(
                     torch.cat(
@@ -426,10 +456,7 @@ class SplatfactoModel(Model):
                         dim=0,
                     )
                 )
-                self.opacities = Parameter(torch.cat([self.opacities.detach(), split_opacities, dup_opacities], dim=0))
-                self.scales = Parameter(torch.cat([self.scales.detach(), split_scales, dup_scales], dim=0))
-                self.quats = Parameter(torch.cat([self.quats.detach(), split_quats, dup_quats], dim=0))
-                # append zeros to the max_2Dsize tensor
+                
                 self.max_2Dsize = torch.cat(
                     [
                         self.max_2Dsize,
@@ -461,7 +488,7 @@ class SplatfactoModel(Model):
             elif self.step >= self.config.stop_split_at and self.config.continue_cull_post_densification:
                 deleted_mask = self.cull_gaussians()
             else:
-                # if we donot allow culling post refinement, no more gaussians will be pruned.
+                # if we do not allow culling post refinement, no more gaussians will be pruned.
                 deleted_mask = None
 
             if deleted_mask is not None:
@@ -578,7 +605,7 @@ class SplatfactoModel(Model):
 
     @property
     def num_points(self):
-        return self.means.shape[0]
+        return self.gaussian_params.num_points
 
     def get_training_callbacks(
         self, training_callback_attributes: TrainingCallbackAttributes
